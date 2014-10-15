@@ -1,0 +1,214 @@
+#!/usr/bin/env perl
+# Copyright (C) 2014  Christian Persson <c0r73x@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use strict;
+use warnings;
+
+use vars qw/ %opt /;
+use File::Basename;
+use Getopt::Std;
+use Cwd 'abs_path';
+use Cwd;
+use Term::ReadKey;
+use IO::Handle qw( );
+use Term::ANSIColor;
+use Term::ANSIColor 2.01 qw(colorstrip);
+
+STDOUT->autoflush(1);
+
+my $FORCE = 0;
+my $COPY_LINKS = 0;
+my $BLOCK_SIZE = 65536;
+
+sub scaleIt
+{
+    my( $size, $n ) =( shift, 0 );
+    ++$n and $size /= 1024 until $size < 1024;
+    return sprintf "%.1f %s",
+          $size, ( qw[ B KB MB GB TB PB ] )[ $n ];
+}
+
+sub prompt {
+    my ($query) = @_;
+    local $| = 1;
+    print $query;
+    chomp(my $answer = <STDIN>);
+    return $answer;
+}
+
+sub copy
+{
+    my ($src, $dest)  = @_;
+    my $oldpath = getcwd;
+
+    if(-l $src) {
+        my $lnk = readlink($src);
+        if($COPY_LINKS == 1) {
+            copy($lnk, $dest);
+        } else {
+            symlink($lnk, $dest);
+        }
+    } elsif(-d $src) {
+        mkdir($dest);
+
+        opendir(my $DIR, $src) or die $!;
+        my @paths = grep { $_ ne '.' && $_ ne '..' } readdir($DIR);
+        closedir($DIR);
+
+        chdir($src) or die $!;
+        foreach my $file (@paths) {
+            copy($file, "$dest/$file");
+        }
+        chdir($oldpath);
+    }  else {
+        if(-d $dest) {
+            copy_file($src, "$dest/".basename($src));
+        } elsif(-l $dest) {
+            my $lnk = readlink($dest);
+            copy($src, $lnk);
+        } else {
+            copy_file($src, $dest);
+        }
+    }
+    return;
+}
+
+sub copy_file
+{
+    my ($wchar, $hchar, $wpixels, $hpixels) = GetTerminalSize();
+
+    my ($src, $dest)  = @_;
+    my $perc = 0;
+    my ($num_read,
+        $num_write,
+        $buffer);
+    my ($lprog, $rprog);
+
+    my $path = getcwd;
+    print "$path/$src => $dest\n";
+    if(-e $dest and $FORCE != 1) {
+        if(prompt("overwrite '$dest'? ") !~ /y/i) {
+            exit;
+        }
+    }
+
+    open (my $SRC, '<', $src)
+        or die "Could not open source file '$src': $!\n";
+    open (my $DEST, '>', $dest)
+        or die "Could not open destination file '$dest': $!\n";
+
+    binmode $SRC;
+    binmode $DEST;
+
+    my $fsize = (-s $src);
+    my $bsize = $BLOCK_SIZE;
+
+    my $time = time;
+    my $tot_write = 0;
+    my $last_tot = 0;
+    my $last_perc = 0;
+    my $eta = '00:00:00';
+    my $bps = 0;
+
+    while (1) {
+        $num_read = sysread($SRC, $buffer, $bsize);
+        last if ($num_read == 0);
+
+        die ("Error reading from file '$src': $!\n") if(!defined($num_read));
+
+        my $offset = 0;
+        while($num_read) {
+            $num_write = syswrite($DEST, $buffer, $num_read, $offset);
+
+            die ("Error writing to file '$dest': $!\n") if(!defined($num_write));
+
+            $num_read -= $num_write;
+            $offset += $num_write;
+            $tot_write += $num_write;
+
+            my $tdiff =  time - $time;
+
+            my $perc_calc = $tot_write / $fsize;
+            $perc = (($tot_write / $fsize) * 100) unless ($perc == 100);
+            $lprog = sprintf("%.0f%%", $perc);
+            $lprog = sprintf(color('green')."%-5s", $lprog);
+
+            if($tdiff >= 1) {
+                if($bps > 0) {
+                    my $esec = ($fsize - $tot_write) / $bps;
+                    my $hours = int($esec / 3600);
+                    $esec = $esec % 3600;
+                    my $minutes = int($esec / 60);
+                    $esec = $esec % 60;
+                    my $seconds = $esec;
+
+                    $eta = sprintf("%02d:%02d:%02d", $hours, $minutes, $seconds);
+                }
+
+                $bps = ($tot_write - $last_tot) * $tdiff;
+                $last_tot = $tot_write;
+                $time = time;
+            }
+            $rprog = sprintf(" ".color('blue')."%s ".color('magenta')."%s",
+                scaleIt($bps).'\s', $eta);
+
+            my $bar_width = ($wchar - (length(colorstrip($lprog.$rprog))+2));
+            my $bar = sprintf("%-${bar_width}s",('#' x ($bar_width * $perc_calc)));
+
+            my $process = sprintf("%s".color('reset')."[%s]%s".color('reset'),
+                $lprog, $bar,$rprog);
+
+            print "\r$process";
+        }
+    }
+    print("\n");
+
+    close($SRC);
+    close($DEST);
+
+    return;
+}
+
+sub usage
+{
+    print STDOUT (
+        "Usage: $0 [options] <source> <destination>\n" .
+        "\t-b num\t: blocksize in bytes.\n" .
+        "\t-l\t: copy contents of symlinks.\n" .
+        "\t-f\t: force copy.\n" .
+        "\t-h\t: help\n");
+    exit;
+}
+
+getopts("b:flh", \%opt) or usage();
+usage() if $opt{h};
+
+$FORCE = ($opt{f}) ? 1 : $FORCE;
+$COPY_LINKS = ($opt{l}) ? 1 : $COPY_LINKS;
+$BLOCK_SIZE = ($opt{b}) ? $opt{b} : $BLOCK_SIZE;
+
+if(@ARGV == 2) {
+    copy($ARGV[0], abs_path($ARGV[1]));
+} elsif(@ARGV > 2) {
+    my $dest = abs_path($ARGV[@ARGV - 1]);
+    foreach my $src (@ARGV) {
+        last if ($src eq $dest);
+
+        copy(abs_path($src), $dest);
+    }
+} else {
+    usage();
+}

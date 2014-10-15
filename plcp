@@ -207,7 +207,12 @@ if(@ARGV == 2) {
     foreach my $src (@ARGV) {
         last if ($src eq $dest);
 
-        copy(abs_path($src), $dest);
+        if(-d $src) {
+            mkdir($dest);
+            copy($src, "$dest/".basename($src));
+        } else {
+            copy($src, $dest);
+        }
     }
 } else {
     usage();

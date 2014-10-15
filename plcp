@@ -88,9 +88,9 @@ sub copy
 
 sub copy_file
 {
-    my ($wchar, $hchar, $wpixels, $hpixels) = GetTerminalSize();
-
     my ($src, $dest)  = @_;
+
+    my $wchar = (GetTerminalSize())[0];
     my $perc = 0;
     my ($num_read,
         $num_write,
@@ -185,10 +185,10 @@ sub copy_file
 sub usage
 {
     print STDOUT (
-        "Usage: $0 [options] <source> <destination>\n" .
-        "\t-b num\t: blocksize in bytes.\n" .
-        "\t-l\t: copy contents of symlinks.\n" .
-        "\t-f\t: force copy.\n" .
+        "Usage: ".basename($0)." [options] <source> <destination>\n" .
+        "\t-b num\t: blocksize in bytes\n" .
+        "\t-l\t: copy contents of symlinks\n" .
+        "\t-f\t: force copy\n" .
         "\t-h\t: help\n");
     exit;
 }
@@ -203,7 +203,7 @@ $BLOCK_SIZE = ($opt{b}) ? $opt{b} : $BLOCK_SIZE;
 if(@ARGV == 2) {
     copy($ARGV[0], abs_path($ARGV[1]));
 } elsif(@ARGV > 2) {
-    my $dest = abs_path($ARGV[@ARGV - 1]);
+    my $dest = abs_path($ARGV[-1]);
     foreach my $src (@ARGV) {
         last if ($src eq $dest);
 

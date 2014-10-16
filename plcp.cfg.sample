@@ -1,0 +1,11 @@
+[bar]
+left_bracket='['
+right_bracket=']'
+complete='#'
+
+[colors]
+eta='magenta'
+bps='blue'
+bar='reset'
+brackets='reset'
+percent='green'

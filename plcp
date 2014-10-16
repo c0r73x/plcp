@@ -26,12 +26,37 @@ use Term::ReadKey;
 use IO::Handle qw( );
 use Term::ANSIColor;
 use Term::ANSIColor 2.01 qw(colorstrip);
+use Config::Simple;
+
+use Env qw(
+    $XDG_CONFIG_HOME
+    $HOME
+);
 
 STDOUT->autoflush(1);
 
 my $FORCE = 0;
 my $COPY_LINKS = 0;
 my $BLOCK_SIZE = 65536;
+
+my %config = (
+    'bar.left_bracket'   =>  '[',
+    'bar.right_bracket'  =>  ']',
+    'bar.complete'       =>  '#',
+    'colors.eta'         =>  'magenta',
+    'colors.bps'         =>  'blue',
+    'colors.bar'         =>  'reset',
+    'colors.brackets'    =>  'reset',
+    'colors.percent'     =>  'green'
+);
+
+if (-e "$XDG_CONFIG_HOME/plcp.cfg") {
+    Config::Simple->import_from("$XDG_CONFIG_HOME/plcp.cfg", \%config)
+        or die $!;
+} elsif (-e "$HOME/.plcp.cfg") {
+    Config::Simple->import_from("$HOME/.plcp.cfg", \%config)
+        or die $!;
+}
 
 sub scaleIt
 {
@@ -144,7 +169,10 @@ sub copy_file
             my $perc_calc = $tot_write / $fsize;
             $perc = (($tot_write / $fsize) * 100) unless ($perc == 100);
             $lprog = sprintf("%.0f%%", $perc);
-            $lprog = sprintf(color('green')."%-5s", $lprog);
+            $lprog = sprintf(
+                color($config{'colors.percent'})."%-5s".color('reset'),
+                $lprog
+            );
 
             if($tdiff >= 1) {
                 if($bps > 0) {
@@ -162,14 +190,34 @@ sub copy_file
                 $last_tot = $tot_write;
                 $time = time;
             }
-            $rprog = sprintf(" ".color('blue')."%s ".color('magenta')."%s",
-                scaleIt($bps).'\s', $eta);
+            $rprog = sprintf(
+                " " .
+                color($config{'colors.bps'}) .
+                "%s " .
+                color($config{'colors.eta'}) .
+                "%s" .
+                color('reset'),
+                scaleIt($bps).'\s', $eta
+            );
 
             my $bar_width = ($wchar - (length(colorstrip($lprog.$rprog))+2));
-            my $bar = sprintf("%-${bar_width}s",('#' x ($bar_width * $perc_calc)));
+            my $bar = sprintf(
+                "%-${bar_width}s",
+                ($config{'bar.complete'} x ($bar_width * $perc_calc))
+            );
 
-            my $process = sprintf("%s".color('reset')."[%s]%s".color('reset'),
-                $lprog, $bar,$rprog);
+            my $process = sprintf(
+                "%s" .
+                color($config{'colors.brackets'}) .
+                $config{'bar.left_bracket'} .
+                color($config{'colors.bar'}) .
+                "%s" .
+                color($config{'colors.brackets'}) .
+                $config{'bar.right_bracket'} .
+                "%s" .
+                color('reset'),
+                $lprog, $bar,$rprog
+            );
 
             print "\r$process";
         }

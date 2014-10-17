@@ -20,13 +20,12 @@ use warnings;
 use vars qw/ %opt /;
 use File::Basename;
 use Getopt::Std;
-use Cwd 'abs_path';
-use Cwd;
 use Term::ReadKey;
 use IO::Handle qw( );
 use Term::ANSIColor;
 use Term::ANSIColor 2.01 qw(colorstrip);
 use Config::Simple;
+use Net::OpenSSH;
 
 use Env qw(
     $XDG_CONFIG_HOME
@@ -58,6 +57,138 @@ if (-e "$XDG_CONFIG_HOME/plcp.cfg") {
         or die $!;
 }
 
+{
+    my $last_src_host = '';
+    my $last_dest_host = '';
+
+    my ($src_ssh, $dest_ssh);
+
+    sub ssh_copy
+    {
+        my ($src, $dest) = @_;
+
+        if($src =~ m/^([A-Z0-9._-]+@)?[A-Z0-9.-]+:/i) {
+            (my $host = $src) =~ s/^((?:[A-Z0-9._-]+@)?[A-Z0-9.-]+):.*/$1/i;
+            $src =~ s/^.*:(.*)$/$1/;
+
+            if($last_src_host ne $host) {
+                undef $src_ssh;
+                print "Connecting to $host\n";
+                $src_ssh = Net::OpenSSH->new($host);
+                $src_ssh->error
+                    and die "Can't connect to $host: " . $src_ssh->error;
+
+                $last_src_host = $host;
+            }
+        }
+        if($dest =~ m/^([A-Z0-9._-]+@)?[A-Z0-9.-]+:/i) {
+            (my $host = $dest) =~ s/^((?:[A-Z0-9._-]+@)?[A-Z0-9.-]+):.*/$1/i;
+            $dest =~ s/^.*:(.*)$/$1/;
+
+            if($last_dest_host ne $host) {
+                undef $dest_ssh;
+
+                print "Connecting to $host\n";
+                $dest_ssh = Net::OpenSSH->new($host);
+                $dest_ssh->error
+                    and die "Can't connect to $host: " . $dest_ssh->error;
+
+                $last_dest_host = $host;
+            }
+        }
+
+        copy($src, $dest, $src_ssh, $dest_ssh);
+    }
+}
+
+{
+
+    my ($wchar, $time, $tot_write, $last_tot, $eta, $bps, $perc);
+
+    sub reset_process
+    {
+        $wchar = (GetTerminalSize())[0];
+        $time = time;
+        $tot_write = 0;
+        $last_tot = 0;
+        $eta = '00:00:00';
+        $bps = 0;
+        $perc = 0;
+
+        return;
+    }
+
+    sub draw_process
+    {
+        my ($num_write, $fsize) = @_;
+        my ($lprog, $rprog);
+
+        $tot_write += $num_write;
+
+        my $perc_calc = $tot_write / $fsize;
+        $perc = (($tot_write / $fsize) * 100) unless ($perc == 100);
+        $lprog = sprintf("%.0f%%", $perc);
+        $lprog = sprintf(
+            color($config{'colors.percent'})."%-5s".color('reset'),
+            $lprog
+        );
+
+        my $tdiff =  time - $time;
+
+        if($tdiff >= 1) {
+            if($bps > 0) {
+                my $esec = ($fsize - $tot_write) / $bps;
+                my $hours = int($esec / 3600);
+                $esec = $esec % 3600;
+                my $minutes = int($esec / 60);
+                $esec = $esec % 60;
+                my $seconds = $esec;
+
+                $eta = sprintf("%02d:%02d:%02d", $hours, $minutes, $seconds);
+            }
+
+            $bps = ($tot_write - $last_tot) * $tdiff;
+            $last_tot = $tot_write;
+            $time = time;
+        }
+        $rprog = sprintf(
+            " " .
+            color($config{'colors.bps'}) .
+            "%s " .
+            color($config{'colors.eta'}) .
+            "%s" .
+            color('reset'),
+            scaleIt($bps).'\s', $eta
+        );
+
+        my $bar_width = ($wchar - (length(colorstrip($lprog.$rprog))+2));
+        my $bar = sprintf(
+            "%-${bar_width}s",
+            ($config{'bar.complete'} x ($bar_width * $perc_calc))
+        );
+
+        my $process = sprintf(
+            "%s" .
+            color($config{'colors.brackets'}) .
+            $config{'bar.left_bracket'} .
+            color($config{'colors.bar'}) .
+            "%s" .
+            color($config{'colors.brackets'}) .
+            $config{'bar.right_bracket'} .
+            "%s" .
+            color('reset'),
+            $lprog, $bar,$rprog
+        );
+
+        return $process;
+    }
+}
+
+sub bytelen {
+    require bytes;
+    return bytes::length($_[0]);
+}
+
 sub scaleIt
 {
     my( $size, $n ) =( shift, 0 );
@@ -74,159 +205,273 @@ sub prompt {
     return $answer;
 }
 
-sub copy
+sub file_open
 {
-    my ($src, $dest)  = @_;
-    my $oldpath = getcwd;
+    my ($path, $rw, $ssh) = @_;
+    my $OUTPUT;
 
-    if(-l $src) {
-        my $lnk = readlink($src);
-        if($COPY_LINKS == 1) {
-            copy($lnk, $dest);
-        } else {
-            symlink($lnk, $dest);
+    if(defined $ssh) {
+        chop(my $rpath = $ssh->capture("readlink -f $path"));
+
+        if($rw eq '<') {
+            $OUTPUT = $ssh->pipe_out("cat $rpath")
+                or die "Could not open remote file: " . $ssh->error;
+        } elsif ($rw eq '>') {
+            $OUTPUT = $ssh->pipe_in("cat >$rpath")
+                or die "Could not open remote file: " . $ssh->error;
         }
-    } elsif(-d $src) {
-        mkdir($dest);
+    } else {
+        open ($OUTPUT, $rw, $path)
+            or die "Could not open file '$path': $!\n";
+        binmode $OUTPUT;
+    }
 
-        opendir(my $DIR, $src) or die $!;
-        my @paths = grep { $_ ne '.' && $_ ne '..' } readdir($DIR);
-        closedir($DIR);
+    return $OUTPUT;
+}
 
-        chdir($src) or die $!;
-        foreach my $file (@paths) {
-            copy($file, "$dest/$file");
-        }
-        chdir($oldpath);
-    }  else {
-        if(-d $dest) {
-            copy_file($src, "$dest/".basename($src));
-        } elsif(-l $dest) {
-            my $lnk = readlink($dest);
-            copy($src, $lnk);
+sub file_readlink
+{
+    my ($path, $ssh) = @_;
+    my $lnk;
+
+    if(defined $ssh) {
+        chop($lnk = $ssh->capture("readlink -f $path"));
+        $ssh->error and die "remote command failed: " . $ssh->error;
+    } else {
+        $lnk = readlink($path);
+    }
+
+    return $lnk;
+}
+
+sub file_close
+{
+    my ($fp, $ssh) = @_;
+
+    if(defined $ssh) {
+        close $fp or die "Error while closing pipe: $!";
+    } else {
+        close($fp);
+    }
+
+    return;
+}
+
+sub file_gettype
+{
+    my ($path, $ssh) = @_;
+    my $type;
+
+    if(defined $ssh) {
+        chop(my $rpath = $ssh->capture("readlink -f $path"));
+        chop($type = $ssh->capture("stat -c '%F' $rpath 2>/dev/null"));
+    } else {
+        if(-d $path) {
+            $type = 'directory';
+        } elsif(-l $path) {
+            $type = 'symbolic link';
         } else {
-            copy_file($src, $dest);
+            $type = 'regular file';
         }
     }
+
+    return $type;
+}
+
+sub file_getsize
+{
+    my ($path, $ssh) = @_;
+    my $size;
+
+    if(defined $ssh) {
+        chop(my $rpath = $ssh->capture("readlink -f $path"));
+        chop($size = $ssh->capture("stat -c '%s' $rpath"));
+        $ssh->error and die "remote command failed: " . $ssh->error;
+    } else {
+        $size = (-s $path);
+    }
+
+    return $size;
+}
+
+sub file_readbytes
+{
+    my ($fp, $ssh) = @_;
+    my $num_read = 0;
+    my $buffer = '';
+
+    if(defined $ssh) {
+        my $num_buf = 0;
+
+        while(<$fp>) {
+            $buffer .= $_;
+            $num_read = bytelen($buffer);
+            $num_buf = bytelen($_);
+
+            last if ($num_read >= $BLOCK_SIZE or $num_buf == 0);
+        }
+    } else {
+        $num_read = sysread($fp, $buffer, $BLOCK_SIZE);
+        die ("Error reading from file: $!\n") if(!defined($num_read));
+    }
+
+    return ($num_read, $buffer);
+
+}
+
+sub file_writebytes
+{
+    my ($fp, $buffer, $num_read, $offset, $ssh) = @_;
+    my $num_write;
+
+    if(defined $ssh) {
+        print $fp $buffer;
+        $num_write = bytelen($buffer);
+    } else {
+        $num_write = syswrite($fp, $buffer, $num_read, $offset);
+        die ("Error writing to file: $!\n") if(!defined($num_write));
+    }
+
+    return ($num_write, $offset);
+}
+
+sub file_mkdir
+{
+    my ($path, $ssh) = @_;
+
+    if(defined $ssh) {
+        $ssh->system("mkdir -p $path")
+            or die "remote command failed: " . $ssh->error;
+    } else {
+        mkdir($path);
+    }
+
     return;
+}
+
+sub file_listdir
+{
+    my ($path, $ssh) = @_;
+    my @paths;
+
+    if(defined $ssh) {
+        @paths = split(' ', $ssh->capture("ls $path"));
+        $ssh->error and die "remote command failed: " . $ssh->error;
+    } else {
+        opendir(my $DIR, $path) or die $!;
+        @paths = grep { $_ ne '.' && $_ ne '..' } readdir($DIR);
+        closedir($DIR);
+    }
+
+    return @paths;
+}
+
+sub file_symlink
+{
+    my ($lnk, $path, $ssh) = @_;
+
+    if(defined $ssh) {
+        $ssh->system("ln -sf $lnk $path")
+            or die "remote command failed: " . $ssh->error;
+    } else {
+        symlink($lnk, $path);
+    }
+
+    return;
+}
+
+sub file_exists
+{
+    my ($path, $ssh) = @_;
+    my $exists;
+
+    if(defined $ssh) {
+        chop(my $rpath = $ssh->capture("readlink -f $path"));
+        chop($exists = $ssh->capture("[ -e $rpath ] && echo 1 || echo 0"));
+        $ssh->error and die "remote command failed: " . $ssh->error;
+    } else {
+        $exists = (-e $path) ? 1 : 0;
+    }
+
+    return $exists;
 }
 
 sub copy_file
 {
-    my ($src, $dest)  = @_;
+    my ($src, $dest, $src_ssh, $dest_ssh) = @_;
 
-    my $wchar = (GetTerminalSize())[0];
-    my $perc = 0;
     my ($num_read,
         $num_write,
         $buffer);
-    my ($lprog, $rprog);
 
-    my $path = getcwd;
-    print "$path/$src => $dest\n";
-    if(-e $dest and $FORCE != 1) {
+    $src =~ s/[\/]+/\//g;
+    print "$src => $dest\n";
+    if(file_exists($dest, $dest_ssh) and $FORCE != 1) {
         if(prompt("overwrite '$dest'? ") !~ /y/i) {
             exit;
         }
     }
 
-    open (my $SRC, '<', $src)
-        or die "Could not open source file '$src': $!\n";
-    open (my $DEST, '>', $dest)
-        or die "Could not open destination file '$dest': $!\n";
+    my $SRC = file_open($src, '<', $src_ssh);
+    my $DEST = file_open($dest, '>', $dest_ssh);
 
-    binmode $SRC;
-    binmode $DEST;
+    my $fsize = file_getsize($src, $src_ssh);
 
-    my $fsize = (-s $src);
-    my $bsize = $BLOCK_SIZE;
-
-    my $time = time;
-    my $tot_write = 0;
-    my $last_tot = 0;
-    my $last_perc = 0;
-    my $eta = '00:00:00';
-    my $bps = 0;
+    reset_process();
 
     while (1) {
-        $num_read = sysread($SRC, $buffer, $bsize);
+        ($num_read, $buffer) = file_readbytes($SRC, $src_ssh);
         last if ($num_read == 0);
-
-        die ("Error reading from file '$src': $!\n") if(!defined($num_read));
 
         my $offset = 0;
         while($num_read) {
-            $num_write = syswrite($DEST, $buffer, $num_read, $offset);
-
-            die ("Error writing to file '$dest': $!\n") if(!defined($num_write));
+            ($num_write, $offset) = file_writebytes($DEST, $buffer, $num_read, $offset, $dest_ssh);
 
             $num_read -= $num_write;
             $offset += $num_write;
-            $tot_write += $num_write;
 
-            my $tdiff =  time - $time;
-
-            my $perc_calc = $tot_write / $fsize;
-            $perc = (($tot_write / $fsize) * 100) unless ($perc == 100);
-            $lprog = sprintf("%.0f%%", $perc);
-            $lprog = sprintf(
-                color($config{'colors.percent'})."%-5s".color('reset'),
-                $lprog
-            );
-
-            if($tdiff >= 1) {
-                if($bps > 0) {
-                    my $esec = ($fsize - $tot_write) / $bps;
-                    my $hours = int($esec / 3600);
-                    $esec = $esec % 3600;
-                    my $minutes = int($esec / 60);
-                    $esec = $esec % 60;
-                    my $seconds = $esec;
-
-                    $eta = sprintf("%02d:%02d:%02d", $hours, $minutes, $seconds);
-                }
-
-                $bps = ($tot_write - $last_tot) * $tdiff;
-                $last_tot = $tot_write;
-                $time = time;
-            }
-            $rprog = sprintf(
-                " " .
-                color($config{'colors.bps'}) .
-                "%s " .
-                color($config{'colors.eta'}) .
-                "%s" .
-                color('reset'),
-                scaleIt($bps).'\s', $eta
-            );
-
-            my $bar_width = ($wchar - (length(colorstrip($lprog.$rprog))+2));
-            my $bar = sprintf(
-                "%-${bar_width}s",
-                ($config{'bar.complete'} x ($bar_width * $perc_calc))
-            );
-
-            my $process = sprintf(
-                "%s" .
-                color($config{'colors.brackets'}) .
-                $config{'bar.left_bracket'} .
-                color($config{'colors.bar'}) .
-                "%s" .
-                color($config{'colors.brackets'}) .
-                $config{'bar.right_bracket'} .
-                "%s" .
-                color('reset'),
-                $lprog, $bar,$rprog
-            );
-
-            print "\r$process";
+            print "\r" . draw_process($num_write, $fsize);
         }
     }
     print("\n");
 
-    close($SRC);
-    close($DEST);
+    file_close($SRC, $src_ssh);
+    file_close($DEST, $dest_ssh);
 
+    return;
+}
+
+sub copy
+{
+    my ($src, $dest, $src_ssh, $dest_ssh) = @_;
+    my $src_type = file_gettype($src, $src_ssh);
+    my $dest_type = file_gettype($dest, $dest_ssh);
+
+    if($src_type eq 'symbolic link') {
+        my $lnk = file_readlink($src, $src_ssh);
+        if($COPY_LINKS == 1) {
+            copy($lnk, $dest, $src_ssh, $dest_ssh);
+        } else {
+            file_symlink($lnk, $dest, $dest_ssh);
+        }
+    } elsif($src_type eq 'directory') {
+        file_mkdir($dest, $dest_ssh);
+
+        my @paths = file_listdir($src, $src_ssh);
+
+        foreach my $file (@paths) {
+            copy("$src/$file", "$dest/$file", $src_ssh, $dest_ssh);
+        }
+    }  else {
+        if($dest_type eq 'directory') {
+            copy_file($src, "$dest/".basename($src), $src_ssh, $dest_ssh);
+        } elsif($dest_type eq 'symbolic link') {
+            my $lnk = file_readlink($dest, $dest_ssh);
+            copy($src, $lnk, $src_ssh, $dest_ssh);
+        } else {
+            copy_file($src, $dest, $src_ssh, $dest_ssh);
+        }
+    }
     return;
 }
 
@@ -248,18 +493,21 @@ $FORCE = ($opt{f}) ? 1 : $FORCE;
 $COPY_LINKS = ($opt{l}) ? 1 : $COPY_LINKS;
 $BLOCK_SIZE = ($opt{b}) ? $opt{b} : $BLOCK_SIZE;
 
-if(@ARGV == 2) {
-    copy($ARGV[0], abs_path($ARGV[1]));
-} elsif(@ARGV > 2) {
-    my $dest = abs_path($ARGV[-1]);
-    foreach my $src (@ARGV) {
-        last if ($src eq $dest);
+if(@ARGV >= 2) {
+    my $dest = $ARGV[-1];
+    for my $i (0 .. $#ARGV) {
+        last if ($i == @ARGV - 1);
 
-        if(-d $src) {
-            mkdir($dest);
-            copy($src, "$dest/".basename($src));
+        if($ARGV[$i] =~ m/^([A-Z0-9._-]+@)?[A-Z0-9.-]+:/i
+            or $dest =~ m/^([A-Z0-9._-]+@)?[A-Z0-9.-]+:/i
+        ) {
+            ssh_copy($ARGV[$i], $dest);
         } else {
-            copy($src, $dest);
+            if(file_gettype($ARGV[$i]) eq 'directory') {
+                file_mkdir($dest);
+                $dest = "$dest/" . basename($ARGV[$i]);
+            }
+            copy($ARGV[$i], $dest);
         }
     }
 } else {

@@ -22,8 +22,7 @@ use File::Basename;
 use Getopt::Std;
 use Term::ReadKey;
 use IO::Handle qw( );
-use Term::ANSIColor;
-use Term::ANSIColor 2.01 qw(colorstrip);
+use Term::ANSIColor 2.01 qw(color colorstrip);
 use Config::Simple;
 use Net::OpenSSH;
 
@@ -39,9 +38,11 @@ my $COPY_LINKS = 0;
 my $BLOCK_SIZE = 65536;
 
 my %config = (
+    'settings.colors'    =>  1,
     'bar.left_bracket'   =>  '[',
     'bar.right_bracket'  =>  ']',
     'bar.complete'       =>  '#',
+    'bar.incomplete'     =>  '-',
     'colors.eta'         =>  'magenta',
     'colors.bps'         =>  'blue',
     'colors.bar'         =>  'reset',
@@ -55,6 +56,26 @@ if (-e "$XDG_CONFIG_HOME/plcp.cfg") {
 } elsif (-e "$HOME/.plcp.cfg") {
     Config::Simple->import_from("$HOME/.plcp.cfg", \%config)
         or die $!;
+}
+
+no warnings 'redefine';
+
+sub color
+{
+    if(int($config{'settings.colors'}) == 1) {
+        return Term::ANSIColor::color($_[0]);
+    }
+
+    return '';
+}
+
+sub colorstrip
+{
+    if(int($config{'settings.colors'}) == 1) {
+        return Term::ANSIColor::colorstrip($_[0]);
+    }
+
+    return $_[0];
 }
 
 {
@@ -162,9 +183,11 @@ if (-e "$XDG_CONFIG_HOME/plcp.cfg") {
         );
 
         my $bar_width = ($wchar - (length(colorstrip($lprog.$rprog))+2));
+        my $bar_complete = ($bar_width * $perc_calc);
         my $bar = sprintf(
-            "%-${bar_width}s",
-            ($config{'bar.complete'} x ($bar_width * $perc_calc))
+            "%s%s",
+            ($config{'bar.complete'} x $bar_complete),
+            ($config{'bar.incomplete'} x ($bar_width - $bar_complete))
         );
 
         my $process = sprintf(

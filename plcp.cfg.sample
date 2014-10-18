@@ -1,7 +1,11 @@
+[settings]
+colors=1
+
 [bar]
 left_bracket='['
 right_bracket=']'
 complete='#'
+incomplete='-'
 
 [colors]
 eta='magenta'

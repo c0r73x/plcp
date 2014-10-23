@@ -501,11 +501,13 @@ sub copy
 sub usage
 {
     print STDOUT (
-        "Usage: ".basename($0)." [options] <source> <destination>\n" .
-        "\t-b num\t: blocksize in bytes\n" .
-        "\t-l\t: copy contents of symlinks\n" .
-        "\t-f\t: force copy\n" .
-        "\t-h\t: help\n");
+        "Usage:\n" .
+        "  " . basename($0)." [options] <source> <destination>\n\n" .
+        "Options:\n" .
+        "  -b <size>\t blocksize in bytes\n" .
+        "  -l       \t copy contents of symlinks\n" .
+        "  -f       \t force copy\n" .
+        "  -h       \t help\n");
     exit;
 }
 
